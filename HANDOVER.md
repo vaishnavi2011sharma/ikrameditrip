@@ -71,3 +71,15 @@ Migration 4 adds `doctors.city`, `doctors.profile_card_url`, `app_meta`.
 - Hospitals: every hospital has a short description (hospitals.summary, set by `npm run db:seed` — run it once on an existing database; admin-written text is never overwritten). Cards show the description instead of the old one-word tag.
 - Patient feedback: unchanged and ready — add entries in Admin → Testimonials (tick Published + Consent); the labelled demo cards disappear automatically once one real entry is published.
 - Header (final): the design is the original one (tagline, 'Know your cost' button, same gaps/fonts). Only the container is wider (max-w-7xl) and the full menu starts at 1280px (hamburger below), because at the old 1152px container width Contact was pushed under the button. Rendered in headless Chromium at 1280–1600px (also with +0.35px letter-spacing to mimic the wider Plus Jakarta font): no overlap (>=65px spare), no horizontal overflow, Departments flyout and Doctors/Hospitals panels inside the viewport.
+
+## Deploying — Vercel vs a persistent host (important)
+**Root cause of `ENOENT: mkdir './data'` on Vercel:** `openDb()` created `./data` (relative to the working folder) and kept the SQLite file there. On Vercel the project folder (`/var/task`) is read-only and each serverless instance has its own throw-away disk, so the folder can't be created and a SQLite file can never hold leads, users or admin edits there. (Uploads in `UPLOAD_DIR` have the same limit.)
+
+**What the code does now (`src/backend/db/client.ts`, `api/handler.ts`):**
+- Local dev / any Node host with a disk: unchanged (`DATABASE_PATH`, default `./data/ikra.db`, now resolved to an absolute path; a failing mkdir gives an explicit error message instead of an obscure one).
+- Vercel / AWS Lambda / Netlify (detected via `VERCEL`, `AWS_LAMBDA_FUNCTION_NAME`, `NETLIFY`): the site runs **read-only** from a database rebuilt in the OS temp folder from the bundled client data (hospitals, doctors, treatments, blog). The project folder is never touched. Every write (`POST/PATCH/DELETE /api/*`: enquiry form, admin login/edits, uploads) is refused with a clear 503 ("call/e-mail us") — nothing is silently lost. `GET /api/health` reports `read-only` or `read-write`.
+- This is a stop-gap that brings the public site back; **enquiries and the admin panel will not work on Vercel until a persistent database is in place.**
+
+**Two ways to get a persistent database (choose one):**
+1. **Recommended, no code change:** host on a Node server with a disk (Railway/Render/Fly volume, or a VPS). Build with `npm run build:node`, set `DATABASE_PATH` and `UPLOAD_DIR` to the mounted volume (e.g. `/data/ikra.db`), `IP_HASH_SALT`, SMTP vars. Back up the volume.
+2. **Stay on Vercel:** the data layer must move to a hosted database — e.g. Turso (libSQL, same SQLite SQL; env `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`) or Neon/Vercel Postgres (`DATABASE_URL`) — and uploads to Vercel Blob (`BLOB_READ_WRITE_TOKEN`). The repository code is synchronous (`node:sqlite`), so this is an async rewrite of `src/backend/repo/*`, `api/handler.ts`, auth and tests — a separate piece of work, not a one-line fix.

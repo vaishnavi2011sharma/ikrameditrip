@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { migrations } from "./schema";
 import { seed } from "../seed";
 
@@ -14,7 +15,18 @@ export function openDb(path: string): DB {
   if (maj < 22 || (maj === 22 && min < 5)) {
     throw new Error(`Node.js 22.5 or newer is required (found ${process.versions.node}) — the database uses the built-in node:sqlite.`);
   }
-  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  if (path !== ":memory:") {
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+    } catch (e) {
+      // Never hide this: the database file must live on a writable, persistent disk.
+      throw new Error(
+        `Cannot create the database folder "${dirname(path)}" (${(e as NodeJS.ErrnoException).code ?? "error"}). ` +
+          "Set DATABASE_PATH to a writable, persistent location (e.g. a mounted volume). Serverless hosts such as Vercel have a read-only project folder.",
+        { cause: e },
+      );
+    }
+  }
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
   migrate(db);
@@ -49,13 +61,37 @@ export function migrate(db: DB): number[] {
   return applied;
 }
 
-/** Process-wide connection used by the running site. Path from DATABASE_PATH. */
+/** True on hosts whose project folder is read-only and whose disk is wiped between instances (Vercel, AWS Lambda, Netlify). */
+export function isServerless(): boolean {
+  return !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NETLIFY);
+}
+
+/**
+ * Serverless hosts have no persistent disk, so a SQLite file cannot hold leads/admin edits there. On those hosts the site runs
+ * READ-ONLY from a database rebuilt in the OS temp folder from the bundled client data, and every write (leads, admin login/edits,
+ * uploads) is refused with a clear 503 instead of being silently lost. Persistent hosting: see HANDOVER.md → "Deploying".
+ */
+export function isReadOnlyMode(): boolean {
+  return isServerless();
+}
+
+/** Absolute database path: temp folder in read-only mode, otherwise DATABASE_PATH (default ./data/ikra.db) resolved from the cwd. */
+export function resolveDbPath(): string {
+  if (isReadOnlyMode()) return join(tmpdir(), "ikra-readonly.db");
+  return resolve(process.env.DATABASE_PATH || "./data/ikra.db");
+}
+
+/** Process-wide connection used by the running site. Path from DATABASE_PATH (see resolveDbPath). */
 export function getDb(): DB {
   if (!shared) {
-    shared = openDb(process.env.DATABASE_PATH || "./data/ikra.db");
+    if (isReadOnlyMode())
+      console.warn(
+        "[db] Serverless host detected: running READ-ONLY from bundled client data in the temp folder. Leads, admin edits and uploads are disabled until the site is hosted with a persistent database.",
+      );
+    shared = openDb(resolveDbPath());
     // A brand-new database is filled once with the client-supplied hospitals/doctors/departments so the
     // site is never empty on first run. Skipped when any of those tables already has rows, or AUTO_SEED=false.
-    if (process.env.AUTO_SEED !== "false") {
+    if (process.env.AUTO_SEED !== "false" || isReadOnlyMode()) {
       const n = (t: string) => (shared!.prepare(`SELECT COUNT(*) n FROM ${t}`).get() as { n: number }).n;
       if (n("departments") + n("hospitals") + n("doctors") === 0) seed(shared);
     }

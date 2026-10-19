@@ -1,5 +1,6 @@
 import type { DB } from "../db/client";
-import { getDb } from "../db/client";
+import { getDb, isReadOnlyMode } from "../db/client";
+import { site } from "../../data/site";
 import { getSession, hashToken, login, logout, permissions, rateLimit, hashIp, type Session } from "../lib/auth";
 import {
   createEntity, deleteEntity, entities, getById, listEntities, updateEntity, type EntityKey,
@@ -82,6 +83,11 @@ export async function handleApi(req: Request, db: DB = getDb()): Promise<Respons
   const seg = path.split("/");
   const method = req.method.toUpperCase();
   const q = url.searchParams;
+
+  if (path === "health" && method === "GET") return json({ ok: true, mode: isReadOnlyMode() ? "read-only" : "read-write" });
+  // Serverless hosts cannot keep a database file: refuse writes loudly rather than losing them.
+  if (isReadOnlyMode() && !["GET", "HEAD", "OPTIONS"].includes(method))
+    return err(503, `Enquiries are temporarily unavailable online. Please call ${site.phone} or email ${site.email}.`);
 
   try {
     // ---------------- public lead capture ----------------
